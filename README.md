@@ -1,50 +1,52 @@
-# Finencial Adviser
+<h1 align="center">Financial Adviser API</h1>
 
-![Node.js](https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white)
-![Express](https://img.shields.io/badge/Express.js-404D59?style=for-the-badge&logo=express&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)
-![Prisma](https://img.shields.io/badge/Prisma-3982CE?style=for-the-badge&logo=Prisma&logoColor=white)
-![Google Gemini](https://img.shields.io/badge/Google%20Gemini-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white)
+<div align="center">
+  <img src="https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js">
+  <img src="https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/Express.js-404D59?style=for-the-badge&logo=express&logoColor=white" alt="Express">
+  <img src="https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
+  <img src="https://img.shields.io/badge/Prisma-3982CE?style=for-the-badge&logo=Prisma&logoColor=white" alt="Prisma">
+  <img src="https://img.shields.io/badge/Google%20Gemini-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white" alt="Google Gemini">
+</div>
 
-An AI-powered finencial adviser built with Node.js, Express, TypeScript, and Google Gemini AI with Google Search grounding. Provides real-time analysis, recommendations, and investment guidance for cryptocurrencies and precious metals.
+<br>
 
-## Features
+> **An AI-powered financial adviser backend** built with Node.js, Express, TypeScript, and Google Gemini AI. It provides real-time market analysis, portfolio recommendations, and investment guidance specifically tuned for cryptocurrencies and precious metals.
 
-### 1. Portfolio Management System
-- Add, update, and remove assets (cryptocurrencies and precious metals)
-- Automated analysis every 5 minutes
-- AI-powered buy/sell/hold recommendations
-- Technical analysis with price trends and volatility
-- Sentiment analysis from recent news
-- Risk assessment and confidence scoring
+---
 
-### 2. Real-Time News Aggregation
-- Multi-source news fetching (NewsAPI, GNews, Currents API)
-- Sentiment analysis using HuggingFace FinBERT
-- Real-time updates via Server-Sent Events (SSE)
-- Filtering by asset type, sentiment, and date range
-- Automatic deduplication and relevance scoring
+## ⚡ Key Features
 
-### 3. Intelligent Chatbot
-- Google Gemini AI with Google Search grounding
-- Real-time web information access
-- Source citations and search query transparency
-- Context-aware conversations with memory
-- Personalized investment advice
-- Risk warnings and disclaimers
+- **📊 Portfolio Management System**
+  - Track, add, update, and remove assets (Cryptocurrencies & Precious Metals).
+  - Automated portfolio analysis running locally every 5 minutes.
+  - Generates AI-powered **Buy / Sell / Hold** recommendations with confidence scoring and risk assessment.
+  
+- **📰 Real-Time News & Sentiment Aggregation**
+  - Multi-source financial news fetching (NewsAPI, GNews, Currents API).
+  - Natural Language Processing (NLP) sentiment analysis using **HuggingFace FinBERT**.
+  - Real-time event streaming to clients via Server-Sent Events (SSE).
 
-## Architecture Overview
+- **🤖 Intelligent Financial Chatbot**
+  - Powered by **Google Gemini AI** with Google Search grounding.
+  - Context-aware conversations with persistent session memory.
+  - Transparent source citations, intelligent web data access, and strict risk disclaimers.
 
-This project implements a clean layered architecture, enforcing separation of concerns and robust maintainability. It is structured to follow this flow: `Config → Routes → Controllers → Services → Database`.
+---
+
+## 🏗️ Architecture & Design
+
+This project implements a clean layered architecture, enforcing strict separation of concerns to guarantee robust maintainability and testability.
+
+### 🔄 Data Flow
 
 ```mermaid
 graph TD
     Client((Client)) -->|HTTP Requests| Server[Express Server]
     
     subgraph "Application Architecture"
-        Server --> Config["Config/Middleware Layer<br>(ErrorHandler, Validators)"]
-        Config --> Routes["Routing Layer<br>(Express Router)"]
+        Server --> Config["Config / Middleware<br>(ErrorHandler, Validators)"]
+        Config --> Routes["Routing Layer<br>(Express Routers)"]
         Routes --> Controllers["Controller Layer<br>(Request/Response Handling)"]
         Controllers --> Services["Service Layer<br>(Core Business Logic)"]
     end
@@ -52,7 +54,7 @@ graph TD
     subgraph "Data & External Layers"
         Services --> ORM[Prisma ORM]
         ORM --> DB[(PostgreSQL Database)]
-        Services --> ExternalWeb["External APIs<br>(Gemini, News, Market Data)"]
+        Services --> ExternalWeb["External APIs<br>(Gemini, FinBERT, News, Market Data)"]
     end
     
     style Client fill:#FAFAFA,stroke:#333
@@ -61,387 +63,96 @@ graph TD
     style ORM fill:#e5f1ff,stroke:#3982CE
 ```
 
-## Tech Stack
+### 📂 Directory Structure
 
-- **Runtime**: Node.js with TypeScript
-- **Framework**: Express.js
-- **Database**: PostgreSQL with Prisma ORM
-- **AI/ML**: 
-  - Google Gemini AI with Google Search grounding
-  - HuggingFace FinBERT for sentiment analysis
-- **APIs**:
-  - CoinGecko (Crypto prices)
-  - Metals-API / Gold API (Metal prices)
-  - NewsAPI / GNews / Currents API (News)
-- **Caching**: Node-cache with database persistence
-- **Logging**: Winston
-- **Validation**: Express-validator
+```text
+src/
+├── config/         # Environment variables & DB connection setup
+├── controllers/    # Route controllers (req, res handling)
+├── middleware/     # Express middlewares (Validation, Error Handling, Rate Limiting)
+├── routes/         # Express route definitions
+├── services/       # Core business logic (Cache, Chat, Cron, Market, News)
+├── types/          # TypeScript interfaces & type definitions
+└── utils/          # Utility functions and standard loggers
+```
 
-## Installation
+---
+
+## 🛠️ Technology Stack
+
+| Category         | Technologies Used |
+|-----------------|-------------------|
+| **Runtime**     | Node.js, TypeScript |
+| **Framework**   | Express.js |
+| **Database**    | PostgreSQL, Prisma ORM |
+| **AI / ML**     | Google Gemini AI (Agent/Grounding), HuggingFace FinBERT (Sentiment) |
+| **External APIs**| CoinGecko (Crypto), Gold API (Metals), NewsAPI/GNews (News) |
+| **Tooling**     | Winston (Logging), Node-Cache (Caching), Express-Validator |
+
+---
+
+## 🚀 Getting Started
 
 ### Prerequisites
-- Node.js 18+ 
-- PostgreSQL database
-- API keys (see Environment Variables section)
 
-### Steps
+Ensure you have the following installed on your local machine:
+- **Node.js** (v18 or higher)
+- **PostgreSQL** running locally or via a cloud provider.
+
+### Installation
 
 1. **Clone the repository**
-```bash
-git clone <repository-url>
-cd tbot-new-small
-```
+   ```bash
+   git clone <repository-url>
+   cd financial-advisory-backend # Or your respective directory
+   ```
 
 2. **Install dependencies**
-```bash
-npm install
-```
+   ```bash
+   npm install
+   ```
 
-3. **Set up environment variables**
-```bash
-cp .env.example .env
-```
+3. **Configure Environment Variables**
+   Copy the example config to configure your local keys. Look inside the `.env.example` file for detailed instructions on acquiring required API keys.
+   ```bash
+   cp .env.example .env
+   ```
 
-Edit `.env` and fill in your API keys:
+4. **Initialize Database**
+   Generate the Prisma Client and run migrations to build your SQL schema.
+   ```bash
+   npx prisma generate
+   npx prisma migrate dev
+   ```
 
-```env
-DATABASE_URL="postgresql://username:password@localhost:5432/trading_agent_db"
-GEMINI_API_KEY=your_gemini_api_key
-HUGGINGFACE_API_KEY=your_huggingface_api_key
-NEWS_API_KEY=your_news_api_key
-METALS_API_KEY=your_metals_api_key
-```
+5. **Start the Server**
+   ```bash
+   npm run dev
+   ```
+   *The server will start on `http://localhost:3000`*
 
-4. **Set up Prisma and database**
-```bash
-npm run prisma:generate
-npm run prisma:migrate
-```
+---
 
-5. **Start the development server**
-```bash
-npm run dev
-```
+## 📖 API Documentation
 
-The server will start on `http://localhost:3000`
+The REST API is structurally grouped into the following domains:
 
-## API Keys Setup
+- **Health:** `/api/health` - Basic ping endpoint.
+- **Portfolio:** `/api/portfolio/*` - CRUD operations, automated recommendations, and targeted asset analysis.
+- **News:** `/api/news/*` - Query articles by asset type/sentiment, access summarized news, and subscribe to SSE streams.
+- **Chat:** `/api/chat/*` - Interact with the AI Adviser and fetch contextual conversation histories.
 
-### Required API Keys
+*(For detailed Request/Response schemas, refer to the Postman collection or code validators).*
 
-#### 1. Google Gemini AI (REQUIRED)
-- **Get Key**: https://makersuite.google.com/app/apikey or https://aistudio.google.com/app/apikey
-- **Free Tier**: Yes
-- **Usage**: AI-powered recommendations and chatbot
+---
 
-#### 2. HuggingFace (REQUIRED)
-- **Get Key**: https://huggingface.co/settings/tokens
-- **Sign Up**: https://huggingface.co/join
-- **Free Tier**: Yes
-- **Usage**: Financial sentiment analysis (FinBERT model)
+## 🗄️ Database Schema Summary
 
-#### 3. News API (REQUIRED - Choose ONE)
+- **Portfolio (`assets`)**: Tracks individual user holdings, symbols, types, and amounts.
+- **Recommendations (`recommendations`)**: AI trading indicators (BUY/SELL/HOLD), reasoning text, confidence scores, technicals, and risk levels.
+- **News (`news_articles`)**: Cached articles with FinBERT-scored sentiment, relevance filtering, and source origin.
+- **Chat History (`chat_messages`)**: AI agent dialogues linked to a conversation UUID to preserve context over sessions.
 
-**Option A: NewsAPI.org (Recommended)**
-- **Get Key**: https://newsapi.org/register
-- **Free Tier**: 100 requests/day
-- **Usage**: News articles fetching
+---
 
-**Option B: GNews API**
-- **Get Key**: https://gnews.io/register  
-- **Free Tier**: 100 requests/day
-- **Usage**: Alternative news source
-
-**Option C: Currents API**
-- **Get Key**: https://currentsapi.services/en/register
-- **Free Tier**: Available
-- **Usage**: Alternative news source
-
-#### 4. Metals API (REQUIRED - Choose ONE)
-
-**Option A: Metals-API.com (Recommended)**
-- **Get Key**: https://metals-api.com/signup/free
-- **Free Tier**: 50 requests/month
-- **Usage**: Gold and Silver prices
-
-**Option B: Gold API**
-- **Get Key**: https://www.goldapi.io/dashboard
-- **Free Tier**: Available
-- **Usage**: Alternative metals pricing
-
-### Optional API Keys
-
-#### CoinGecko API (OPTIONAL)
-- **No API Key Required**: Free tier works without authentication
-- **Get Key for Higher Limits**: https://www.coingecko.com/en/api/pricing
-- **Free Tier**: 10-50 calls/minute without key
-- **Usage**: Cryptocurrency prices
-- **Note**: Leave `COINGECKO_API_KEY` empty to use free tier
-
-## API Endpoints
-
-### Health Check
-```
-GET /api/health
-```
-
-### Portfolio Management
-
-#### Add Asset
-```
-POST /api/portfolio/add
-Content-Type: application/json
-
-{
-  "assetName": "Bitcoin",
-  "assetType": "CRYPTO",
-  "symbol": "BTC",
-  "amount": 0.5
-}
-```
-
-#### Get Portfolio
-```
-GET /api/portfolio
-```
-
-#### Update Asset
-```
-PUT /api/portfolio/update/:id
-Content-Type: application/json
-
-{
-  "amount": 1.0
-}
-```
-
-#### Remove Asset
-```
-DELETE /api/portfolio/remove/:id
-```
-
-#### Get Recommendations
-```
-GET /api/portfolio/recommendations
-```
-
-#### Analyze Asset
-```
-POST /api/portfolio/analyze/:id
-```
-
-### News API
-
-#### Get News
-```
-GET /api/news?assetType=CRYPTO&limit=10&sentiment=positive
-```
-
-Query Parameters:
-- `assetType`: CRYPTO | METAL
-- `assetName`: Asset name (e.g., Bitcoin, Gold)
-- `sentiment`: positive | negative | neutral
-- `startDate`: ISO date string
-- `endDate`: ISO date string
-- `limit`: Number of articles (1-100)
-- `offset`: Pagination offset
-
-#### Get News Summary
-```
-GET /api/news/summary/:assetName
-```
-
-#### News Stream (SSE)
-```
-GET /api/news/stream?assetType=CRYPTO
-```
-
-### Chatbot
-
-#### Send Message
-```
-POST /api/chat
-Content-Type: application/json
-
-{
-  "message": "What are the best cryptocurrency investments right now?",
-  "conversationId": "optional-conversation-id"
-}
-```
-
-#### Get Chat History
-```
-GET /api/chat/history?conversationId=xxx&limit=50
-```
-
-## Database Schema
-
-### Portfolio
-- Asset information (name, type, symbol, amount)
-- Timestamps
-
-### Recommendation
-- Trading action (BUY/SELL/HOLD)
-- Reasoning and confidence
-- Technical indicators
-- Sentiment data
-- Risk level
-
-### News
-- Article details
-- Sentiment analysis
-- Related assets
-- Relevance scores
-
-### ChatHistory
-- Conversation messages
-- Sources and tools used
-- Confidence levels
-
-### AnalysisCache
-- Cached API responses
-- Expiration management
-
-## Automated Jobs
-
-The system runs the following cron jobs:
-
-- **Every 5 minutes**: Analyze portfolio assets and fetch news
-- **Daily at midnight**: Clean expired cache
-- **Weekly**: Remove news older than 30 days
-
-## Development
-
-### Available Scripts
-
-```bash
-# Development with auto-reload
-npm run dev
-
-# Build TypeScript
-npm run build
-
-# Start production server
-npm start
-
-# Generate Prisma client
-npm run prisma:generate
-
-# Run database migrations
-npm run prisma:migrate
-
-# Open Prisma Studio
-npm run prisma:studio
-```
-
-### Project Structure
-
-```
-src/
-├── config/          # Configuration files
-│   ├── config.ts    # Environment configuration
-│   └── database.ts  # Prisma client
-├── controllers/     # Request handlers
-│   ├── portfolio.controller.ts
-│   ├── news.controller.ts
-│   └── chat.controller.ts
-├── middleware/      # Express middleware
-│   ├── errorHandler.ts
-│   └── validators.ts
-├── routes/          # API routes
-│   ├── portfolio.routes.ts
-│   ├── news.routes.ts
-│   ├── chat.routes.ts
-│   └── index.ts
-├── services/        # Business logic
-│   ├── portfolio.service.ts
-│   ├── marketData.service.ts
-│   ├── news.service.ts
-│   ├── sentiment.service.ts
-│   ├── chatbot.service.ts
-│   ├── cache.service.ts
-│   └── cron.service.ts
-├── utils/           # Utilities
-│   └── logger.ts
-└── server.ts        # Application entry point
-```
-
-## Testing
-
-Import `postman_collection.json` into Postman to test all endpoints.
-
-The collection includes:
-- Health checks
-- Portfolio management (add, update, delete, analyze)
-- News fetching with various filters
-- Chatbot conversations
-- SSE streams
-
-## Error Handling
-
-The API implements comprehensive error handling:
-- Rate limiting (100 requests per 15 minutes)
-- Input validation
-- API fallbacks
-- Exponential backoff for rate limits
-- Detailed logging
-
-## Security Features
-
-- CORS configuration
-- Rate limiting
-- Input validation and sanitization
-- Environment variable protection
-- SQL injection prevention (Prisma)
-- XSS protection
-
-## Deployment
-
-### Environment Variables for Production
-
-```env
-NODE_ENV=production
-DATABASE_URL=your_production_database_url
-PORT=3000
-```
-
-### Build for Production
-
-```bash
-npm run build
-npm start
-```
-
-## Limitations & Notes
-
-1. **Free Tier Limits**:
-   - NewsAPI: 100 requests/day
-   - Metals-API: 50 requests/month
-   - HuggingFace: Rate limited
-   - CoinGecko: 10-50 calls/minute
-
-2. **Metal Historical Data**: Free metal APIs don't provide historical data. The system simulates it for technical analysis.
-
-3. **Caching**: Aggressive caching is used to stay within API limits.
-
-4. **Disclaimers**: All investment advice includes appropriate risk warnings.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
-
-## License
-
-ISC
-
-## Support
-
-For issues and questions, please create an issue in the repository.
-
-## Disclaimer
-
-This software is for educational purposes only. It does NOT provide professional financial advice. Users should consult licensed financial advisors before making investment decisions. Cryptocurrency and metal markets are highly volatile. Only invest what you can afford to lose.
+*Built for advanced automated financial insights. Disclaimer: Not actual certified financial advice.*
