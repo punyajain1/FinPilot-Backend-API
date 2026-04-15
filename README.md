@@ -43,16 +43,16 @@ graph TD
     Client((Client)) -->|HTTP Requests| Server[Express Server]
     
     subgraph "Application Architecture"
-        Server --> Config[Config/Middleware Layer\n(ErrorHandler, Validators)]
-        Config --> Routes[Routing Layer\n(Express Router)]
-        Routes --> Controllers[Controller Layer\n(Request/Response Handling)]
-        Controllers --> Services[Service Layer\n(Core Business Logic)]
+        Server --> Config["Config/Middleware Layer<br>(ErrorHandler, Validators)"]
+        Config --> Routes["Routing Layer<br>(Express Router)"]
+        Routes --> Controllers["Controller Layer<br>(Request/Response Handling)"]
+        Controllers --> Services["Service Layer<br>(Core Business Logic)"]
     end
     
     subgraph "Data & External Layers"
         Services --> ORM[Prisma ORM]
         ORM --> DB[(PostgreSQL Database)]
-        Services --> ExternalWeb[External APIs\n(Gemini, News, Market Data)]
+        Services --> ExternalWeb["External APIs<br>(Gemini, News, Market Data)"]
     end
     
     style Client fill:#FAFAFA,stroke:#333
