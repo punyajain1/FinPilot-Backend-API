@@ -1,5 +1,12 @@
 # Finencial Adviser
 
+![Node.js](https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white)
+![Express](https://img.shields.io/badge/Express.js-404D59?style=for-the-badge&logo=express&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)
+![Prisma](https://img.shields.io/badge/Prisma-3982CE?style=for-the-badge&logo=Prisma&logoColor=white)
+![Google Gemini](https://img.shields.io/badge/Google%20Gemini-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white)
+
 An AI-powered finencial adviser built with Node.js, Express, TypeScript, and Google Gemini AI with Google Search grounding. Provides real-time analysis, recommendations, and investment guidance for cryptocurrencies and precious metals.
 
 ## Features
@@ -26,6 +33,33 @@ An AI-powered finencial adviser built with Node.js, Express, TypeScript, and Goo
 - Context-aware conversations with memory
 - Personalized investment advice
 - Risk warnings and disclaimers
+
+## Architecture Overview
+
+This project implements a clean layered architecture, enforcing separation of concerns and robust maintainability. It is structured to follow this flow: `Config → Routes → Controllers → Services → Database`.
+
+```mermaid
+graph TD
+    Client((Client)) -->|HTTP Requests| Server[Express Server]
+    
+    subgraph "Application Architecture"
+        Server --> Config[Config/Middleware Layer\n(ErrorHandler, Validators)]
+        Config --> Routes[Routing Layer\n(Express Router)]
+        Routes --> Controllers[Controller Layer\n(Request/Response Handling)]
+        Controllers --> Services[Service Layer\n(Core Business Logic)]
+    end
+    
+    subgraph "Data & External Layers"
+        Services --> ORM[Prisma ORM]
+        ORM --> DB[(PostgreSQL Database)]
+        Services --> ExternalWeb[External APIs\n(Gemini, News, Market Data)]
+    end
+    
+    style Client fill:#FAFAFA,stroke:#333
+    style Server fill:#f9f9f9,stroke:#666
+    style DB fill:#5E9EE4,stroke:#316192,stroke-width:2px,color:#fff
+    style ORM fill:#e5f1ff,stroke:#3982CE
+```
 
 ## Tech Stack
 
