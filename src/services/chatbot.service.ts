@@ -21,7 +21,7 @@ const ASSET_KEYWORDS: Record<string, string> = {
 
 class ChatbotService {
   private groq: Groq;
-  private model = 'openai/gpt-oss-120b';
+  private model = 'qwen/qwen3.8-27b';
 
   constructor() {
     this.groq = new Groq({ apiKey: config.apiKeys.groq });

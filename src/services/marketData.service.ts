@@ -1,8 +1,13 @@
 import axios, { AxiosError } from 'axios';
 import * as ccxt from 'ccxt';
+import YahooFinanceClass from 'yahoo-finance2';
+import type { ChartResultArray } from 'yahoo-finance2/esm/src/modules/chart';
 import { config } from '../config/config';
 import { logger } from '../utils/logger';
 import cacheService from './cache.service';
+
+const yahooFinance = new YahooFinanceClass();
+
 
 export interface PriceData {
   symbol: string;
@@ -584,35 +589,60 @@ class MarketDataService {
   }
 
   /**
-   * Get historical price data for metals (simulated — free metal APIs rarely provide history).
+   * Map standard metal names to Yahoo Finance Global USD Futures tickers.
+   */
+  private getYahooFinanceTicker(symbol: string): string {
+    const upper = symbol.toUpperCase();
+    if (upper.includes('GOLD') || upper === 'XAU') return 'GC=F';
+    if (upper.includes('SILVER') || upper === 'XAG') return 'SI=F';
+    if (upper.includes('PLATINUM') || upper === 'XPT') return 'PL=F';
+    if (upper.includes('PALLADIUM') || upper === 'XPD') return 'PA=F';
+    if (upper.includes('COPPER') || upper === 'XCU') return 'HG=F';
+    // Fallback if not recognized (might fail in Yahoo Finance, but we try)
+    return upper;
+  }
+
+  /**
+   * Get historical price data for metals using Yahoo Finance.
    */
   async getMetalHistoricalPrices(
     symbol: string,
     days: number = 7
   ): Promise<HistoricalPrice[]> {
-    const cacheKey = `metal_history:${symbol}:${days}`;
+    const cacheKey = `metal_history_yf:${symbol}:${days}`;
     const cached = await cacheService.get<HistoricalPrice[]>(cacheKey);
     if (cached) return cached;
 
-    const currentPrice = await this.getMetalPrice(symbol);
-    const prices: HistoricalPrice[] = [];
+    const ticker = this.getYahooFinanceTicker(symbol);
+    const period1 = new Date();
+    period1.setDate(period1.getDate() - days);
 
-    for (let i = days - 1; i >= 0; i--) {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      const variation = (Math.random() - 0.5) * 0.04; // ±2%
-      prices.push({
-        timestamp: date,
-        price: currentPrice.price * (1 + variation),
-        volume: Math.floor(1000 + Math.random() * 5000),
-      });
+    try {
+      const result = (await yahooFinance.chart(ticker, {
+        period1,
+        interval: '1d',
+      })) as unknown as ChartResultArray;
+
+      const prices: HistoricalPrice[] = result.quotes.map(quote => ({
+        timestamp: new Date(quote.date),
+        price: quote.close || quote.open || 0,
+        volume: quote.volume || 0,
+      }));
+
+      await cacheService.set(cacheKey, prices, 1800); // Cache for 30 minutes
+      logger.info(`Fetched real historical data for ${symbol} (${ticker}) from Yahoo Finance`);
+      return prices;
+    } catch (error) {
+      logger.error(`Error fetching historical data from Yahoo Finance for ${symbol}:`, error);
+      
+      // Fallback: If it fails, just return current price as a single data point
+      const currentPrice = await this.getMetalPrice(symbol);
+      return [{
+        timestamp: new Date(),
+        price: currentPrice.price,
+        volume: 0
+      }];
     }
-
-    await cacheService.set(cacheKey, prices, 1800); // 30 minutes
-    logger.warn(
-      `Using simulated historical data for ${symbol}. Consider a paid metal data API for real history.`
-    );
-    return prices;
   }
 
   // ---------------------------------------------------------------------------

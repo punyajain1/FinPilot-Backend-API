@@ -275,7 +275,14 @@ class PortfolioService {
         obv: technicalIndicators.obv,
       };
 
-      // Save the analysis to the PortfolioAnalysis table
+      // Delete any existing analyses for this portfolio asset so we only keep the latest one
+      await prisma.portfolioAnalysis.deleteMany({
+        where: { portfolioId: portfolioId },
+      }).catch(err => {
+        logger.error(`Failed to delete previous analyses for ${portfolio.assetName}:`, err);
+      });
+
+      // Save the new analysis to the PortfolioAnalysis table
       await prisma.portfolioAnalysis.create({
         data: { 
           portfolioId: portfolioId,
@@ -420,13 +427,13 @@ REQUIRED JSON FORMAT (respond ONLY with valid JSON):
       logger.info(`Generating AI recommendation for ${portfolio.assetName} at $${currentPrice.toFixed(2)} (bought at $${portfolio.buyingPrice.toFixed(2)})`);
       
       const completion = await this.groq.chat.completions.create({
-        model: 'openai/gpt-oss-120b',
+        model: 'qwen/qwen3.8-27b',
         messages: [
           { role: 'system', content: 'You are a professional financial analyst. Always respond with raw valid JSON only, no markdown.' },
           { role: 'user', content: prompt },
         ],
         temperature: 0.3,
-        max_tokens: 1024,
+        max_tokens: 800,
         response_format: { type: 'json_object' },
       });
       const text = completion.choices[0]?.message?.content;

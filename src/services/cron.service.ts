@@ -16,12 +16,7 @@ class CronJobsService {
    * Initialize all cron jobs
    */
   initializeJobs(): void {
-    // Analyze portfolio assets hourly
-    const portfolioJob = cron.schedule('0 * * * *', async () => {
-      logger.debug('Running portfolio analysis job...');
-      await this.analyzeAllPortfolios();
-    });
-    this.scheduledTasks.push(portfolioJob);
+    // Portfolio analysis is now triggered manually via the UI.
 
     // Fetch news every 5 minutes
     const newsJob = cron.schedule('*/5 * * * *', async () => {
@@ -37,23 +32,22 @@ class CronJobsService {
     });
     this.scheduledTasks.push(cacheJob);
 
-    // Clean old news data (older than 5 days) daily at midnight
+    // Clean old news data (older than 24 hours) daily at midnight
     const cleanNewsJob = cron.schedule('0 0 * * *', async () => {
       logger.debug('Running old news cleanup job...');
       await this.cleanOldNews();
     });
     this.scheduledTasks.push(cleanNewsJob);
 
-    // Run cleanup once on startup to immediately purge anything older than 5 days
+    // Run cleanup once on startup to immediately purge anything older than 24 hours
     this.cleanOldNews().catch(err => {
       logger.error('Startup news cleanup error:', err);
     });
 
     // Register event to wake up and refresh metrics instantly when a browser client connects
     websocketService.onConnect(() => {
-      logger.info('Active client connected: triggering immediate news & portfolio refresh...');
+      logger.info('Active client connected: triggering immediate news refresh...');
       this.fetchAllNews().catch(err => logger.error('Immediate connection news fetch failed:', err));
-      this.analyzeAllPortfolios().catch(err => logger.error('Immediate connection portfolio analysis failed:', err));
     });
 
     logger.info('Cron jobs initialized successfully');
@@ -71,52 +65,7 @@ class CronJobsService {
     logger.info('All cron jobs stopped');
   }
 
-  /**
-   * Analyze all portfolio assets
-   */
-  private async analyzeAllPortfolios(): Promise<void> {
-    try {
-      // Standby check: Skip background analysis if no browser clients are listening
-      if (websocketService.getClientCount() === 0) {
-        logger.debug('Skipping portfolio analysis job: Standby mode (No active clients connected)');
-        return;
-      }
 
-      const portfolios = await portfolioService.getPortfolio();
-      
-      if (portfolios.length === 0) {
-        logger.debug('No portfolio assets to analyze');
-        return;
-      }
-
-      logger.debug(`Analyzing ${portfolios.length} portfolio assets...`);
-
-      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-
-      for (const portfolio of portfolios) {
-        try {
-          // Skip any asset that was analyzed within the last 2 hours
-          const latestAnalysis = await portfolioService.getCachedAnalysis(portfolio.id);
-          if (latestAnalysis && new Date(latestAnalysis.analysisDate) > twoHoursAgo) {
-            logger.debug(`Skipping analysis for ${portfolio.assetName} (${portfolio.symbol}) - analyzed recently at ${new Date(latestAnalysis.analysisDate).toISOString()}`);
-            continue;
-          }
-
-          await portfolioService.analyzeAsset(portfolio.id);
-          logger.debug(`Analysis completed for ${portfolio.assetName}`);
-          
-          // Add delay to avoid rate limits
-          await this.delay(2000); // 2 seconds between each analysis
-        } catch (error) {
-          logger.error(`Error analyzing ${portfolio.assetName}:`, error);
-        }
-      }
-
-      logger.debug('Portfolio analysis job completed');
-    } catch (error) {
-      logger.error('Error in portfolio analysis job:', error);
-    }
-  }
 
   /**
    * Fetch news for all portfolio assets
@@ -239,18 +188,18 @@ class CronJobsService {
    */
   private async cleanOldNews(): Promise<void> {
     try {
-      const fiveDaysAgo = new Date();
-      fiveDaysAgo.setDate(fiveDaysAgo.getDate() - 5);
+      const oneDayAgo = new Date();
+      oneDayAgo.setDate(oneDayAgo.getDate() - 1);
 
       const result = await prisma.news.deleteMany({
         where: {
           publishedAt: {
-            lt: fiveDaysAgo,
+            lt: oneDayAgo,
           },
         },
       });
 
-      logger.debug(`Cleaned ${result.count} old news articles older than 5 days`);
+      logger.debug(`Cleaned ${result.count} old news articles older than 24 hours`);
     } catch (error) {
       logger.error('Error cleaning old news:', error);
     }

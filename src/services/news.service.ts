@@ -70,31 +70,69 @@ class NewsService {
    * Fetch news for specific assets
    */
   async fetchNewsForAssets(assets: string[], assetType: AssetType): Promise<NewsArticle[]> {
-    const allNews: NewsArticle[] = [];
+    const allRawNews: NewsArticle[] = [];
 
     for (const asset of assets) {
       const news = await this.fetchNewsForAsset(asset, assetType);
-      allNews.push(...news);
+      allRawNews.push(...news);
     }
 
     // Deduplicate based on URL
-    const uniqueNews = this.deduplicateNews(allNews);
+    const uniqueNews = this.deduplicateNews(allRawNews);
 
-    // Store in database and return only NEW articles
-    const newArticles = await this.storeNews(uniqueNews);
+    // Find existing articles in DB by URL
+    const urls = uniqueNews.map(n => n.url);
+    const existingArticlesDB = await prisma.news.findMany({
+      where: { url: { in: urls } }
+    });
+    
+    const existingUrls = new Set(existingArticlesDB.map(a => a.url));
+    
+    // Separate new vs existing
+    const newArticles = uniqueNews.filter(n => !existingUrls.has(n.url));
+    
+    // Analyze sentiment only for new articles
+    let analyzedNewArticles: NewsArticle[] = [];
+    if (newArticles.length > 0) {
+      logger.debug(`Found ${newArticles.length} new articles to analyze for sentiment.`);
+      analyzedNewArticles = await this.enrichWithSentiment(newArticles);
+      await this.storeNewArticles(analyzedNewArticles);
+    }
 
-    return newArticles;
+    // Map DB articles back to NewsArticle interface
+    const existingMapped: NewsArticle[] = existingArticlesDB.map(article => ({
+      id: article.id,
+      title: article.title,
+      description: article.description,
+      content: article.content || undefined,
+      source: article.source,
+      author: article.author || undefined,
+      publishedAt: article.publishedAt,
+      url: article.url,
+      imageUrl: article.imageUrl || undefined,
+      relatedAssets: article.relatedAssets,
+      assetType: article.assetType || undefined,
+      sentiment: {
+        score: article.sentimentScore,
+        label: article.sentimentLabel as 'positive' | 'negative' | 'neutral',
+        confidence: Math.abs(article.sentimentScore),
+      },
+      relevanceScore: article.relevanceScore,
+      createdAt: article.createdAt,
+    }));
+    
+    return [...existingMapped, ...analyzedNewArticles].sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
   }
 
   /**
-   * Fetch news for a specific asset
+   * Fetch news for a specific asset (raw, without sentiment analysis)
    */
   private async fetchNewsForAsset(asset: string, assetType: AssetType): Promise<NewsArticle[]> {
-    const cacheKey = `news:${assetType}:${asset}`;
+    const cacheKey = `news:raw:${assetType}:${asset}`;
     const cached = await cacheService.get<NewsArticle[]>(cacheKey);
 
     if (cached) {
-      logger.debug(`Cache hit for news: ${asset}`);
+      logger.debug(`Cache hit for raw news: ${asset}`);
       return cached;
     }
 
@@ -106,12 +144,7 @@ class NewsService {
       this.fetchFromRss(asset, assetType),
     ]);
 
-    let articles = this.deduplicateNews([...paidArticles, ...rssArticles]);
-
-    // Analyze sentiment for each article
-    if (articles.length > 0) {
-      articles = await this.enrichWithSentiment(articles);
-    }
+    const articles = this.deduplicateNews([...paidArticles, ...rssArticles]);
 
     await cacheService.set(cacheKey, articles, 300); // Cache for 5 minutes
     return articles;
@@ -209,8 +242,11 @@ class NewsService {
             });
           }
 
-          logger.debug(`RSS ${feed.name}: ${articles.length} relevant articles for ${asset}`);
-          return articles;
+          articles.sort((a, b) => b.relevanceScore - a.relevanceScore || b.publishedAt.getTime() - a.publishedAt.getTime());
+          const top10 = articles.slice(0, 10);
+
+          logger.debug(`RSS ${feed.name}: ${top10.length} relevant top articles for ${asset} (out of ${articles.length})`);
+          return top10;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger.warn(`RSS feed failed [${feed.name}]: ${msg}`);
@@ -299,7 +335,7 @@ class NewsService {
         },
       });
 
-      return response.data.articles.map((article: any) => ({
+      const articles: NewsArticle[] = response.data.articles.map((article: any) => ({
         title: article.title,
         description: article.description || '',
         content: article.content,
@@ -313,6 +349,10 @@ class NewsService {
         sentiment: { score: 0, label: 'neutral' as const, confidence: 0 },
         relevanceScore: this.calculateRelevance(article.title, article.description, asset),
       }));
+
+      return articles
+        .sort((a, b) => b.relevanceScore - a.relevanceScore || b.publishedAt.getTime() - a.publishedAt.getTime())
+        .slice(0, 10);
     } catch (error) {
       logger.error('NewsAPI fetch error:', error);
       return [];
@@ -333,7 +373,7 @@ class NewsService {
         },
       });
 
-      return response.data.articles.map((article: any) => ({
+      const articles: NewsArticle[] = response.data.articles.map((article: any) => ({
         title: article.title,
         description: article.description || '',
         content: article.content,
@@ -347,6 +387,10 @@ class NewsService {
         sentiment: { score: 0, label: 'neutral' as const, confidence: 0 },
         relevanceScore: this.calculateRelevance(article.title, article.description, asset),
       }));
+
+      return articles
+        .sort((a, b) => b.relevanceScore - a.relevanceScore || b.publishedAt.getTime() - a.publishedAt.getTime())
+        .slice(0, 10);
     } catch (error) {
       logger.error('GNews fetch error:', error);
       return [];
@@ -366,7 +410,7 @@ class NewsService {
         },
       });
 
-      return response.data.news.map((article: any) => ({
+      const articles: NewsArticle[] = response.data.news.map((article: any) => ({
         title: article.title,
         description: article.description || '',
         content: article.description,
@@ -380,6 +424,10 @@ class NewsService {
         sentiment: { score: 0, label: 'neutral' as const, confidence: 0 },
         relevanceScore: this.calculateRelevance(article.title, article.description, asset),
       }));
+
+      return articles
+        .sort((a, b) => b.relevanceScore - a.relevanceScore || b.publishedAt.getTime() - a.publishedAt.getTime())
+        .slice(0, 10);
     } catch (error) {
       logger.error('Currents API fetch error:', error);
       return [];
@@ -453,37 +501,14 @@ class NewsService {
   }
 
   /**
-   * Store news in database and return only NEW articles
+   * Store new articles in the database
    */
-  private async storeNews(articles: NewsArticle[]): Promise<NewsArticle[]> {
-    const newArticles: NewsArticle[] = [];
-
+  private async storeNewArticles(articles: NewsArticle[]): Promise<void> {
     for (const article of articles) {
       try {
-        // Check if article already exists
-        const existingArticle = await prisma.news.findUnique({
-          where: { url: article.url },
-        });
-
-        // If article doesn't exist, it's new
-        const isNew = !existingArticle;
-
         await prisma.news.upsert({
           where: { url: article.url },
-          update: {
-            title: article.title,
-            description: article.description,
-            content: article.content,
-            source: article.source,
-            author: article.author,
-            publishedAt: article.publishedAt,
-            imageUrl: article.imageUrl,
-            relatedAssets: article.relatedAssets,
-            assetType: article.assetType,
-            sentimentScore: article.sentiment.score,
-            sentimentLabel: article.sentiment.label,
-            relevanceScore: article.relevanceScore,
-          },
+          update: {},
           create: {
             title: article.title,
             description: article.description,
@@ -500,19 +525,12 @@ class NewsService {
             relevanceScore: article.relevanceScore,
           },
         });
-
-        // Only add to newArticles if it was actually new
-        if (isNew) {
-          newArticles.push(article);
-          logger.debug(`New article stored: ${article.title}`);
-        }
+        logger.debug(`New article stored: ${article.title}`);
       } catch (error) {
         logger.error(`Error storing news article: ${article.url}`, error);
       }
     }
-
-    logger.debug(`Stored news: ${newArticles.length} new out of ${articles.length} total`);
-    return newArticles;
+    logger.debug(`Successfully stored ${articles.length} new articles.`);
   }
 
   /**
