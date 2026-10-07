@@ -92,7 +92,7 @@ app.use(errorHandler);
 
 const PORT = config.port;
 
-httpServer.listen(PORT as number, '127.0.0.1', () => {
+httpServer.listen(PORT as number, '0.0.0.0', () => {
   logger.info(`Server running on port ${PORT}`);
   logger.info(`Environment: ${config.nodeEnv}`);
 
@@ -136,10 +136,6 @@ const handleGracefulShutdown = async (signal: string) => {
 
 process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
-
-app.get('/', (req, res) => {
-  res.sendFile(path.resolve('public/index.html'));
-});
 
 // Trigger nodemon reload for .env configuration updates.
 export default app;
