@@ -30,17 +30,8 @@ class WebSocketService {
     this.wss = new WebSocketServer({ server, path: '/ws/news' });
 
     this.wss.on('connection', async (ws: WebSocket, req: any) => {
-      const ip = req?.socket?.remoteAddress || 'unknown';
-      const currentConnections = this.ipConnections.get(ip) || 0;
-
-      if (currentConnections >= 2) {
-        logger.warn(`Rejected WebSocket connection from ${ip}: max 2 connections allowed in demo`);
-        ws.close(1008, 'Too many connections from this IP');
-        return;
-      }
-
-      this.ipConnections.set(ip, currentConnections + 1);
-      logger.info(`New WebSocket client connected from ${ip} (${currentConnections + 1}/2)`);
+      const ip = req?.headers['x-forwarded-for'] || req?.socket?.remoteAddress || 'unknown';
+      logger.info(`New WebSocket client connected from ${ip}`);
       this.clients.add(ws);
       this.clientSubscriptions.set(ws, new Set(['news:all']));
 
@@ -85,13 +76,6 @@ class WebSocketService {
         logger.info(`WebSocket client disconnected from ${ip}`);
         this.clients.delete(ws);
         this.clientSubscriptions.delete(ws);
-        
-        const count = this.ipConnections.get(ip) || 1;
-        if (count <= 1) {
-          this.ipConnections.delete(ip);
-        } else {
-          this.ipConnections.set(ip, count - 1);
-        }
       });
 
       // Handle errors
@@ -99,13 +83,6 @@ class WebSocketService {
         logger.error(`WebSocket error from ${ip}:`, error);
         this.clients.delete(ws);
         this.clientSubscriptions.delete(ws);
-        
-        const count = this.ipConnections.get(ip) || 1;
-        if (count <= 1) {
-          this.ipConnections.delete(ip);
-        } else {
-          this.ipConnections.set(ip, count - 1);
-        }
       });
     });
 
