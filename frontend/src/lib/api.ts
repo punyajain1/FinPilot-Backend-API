@@ -107,4 +107,4 @@ export const api = {
   getDerivatives: (symbol: string) => fetch(`${API_BASE}/derivatives/${symbol}`).then(res => res.json())
 };
 
-export const WS_URL = 'ws://localhost:4000/ws/news';
+export const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:4000/ws/news';
