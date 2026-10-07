@@ -30,6 +30,9 @@ export interface UpdateAssetRequest {
 }
 
 export const api = {
+  // System
+  wakeup: () => fetch(`${API_BASE}/health`).then(res => res.json()).catch(err => console.error('Wakeup failed:', err)),
+
   // Market
   getGlobalMarket: () => fetch(`${API_BASE}/market/global`).then(res => res.json()),
 

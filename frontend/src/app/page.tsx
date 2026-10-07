@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   LineChart,
@@ -19,6 +19,7 @@ import Link from "next/link";
 import Image from "next/image";
 import ArchitectureDiagram from "../components/ArchitectureDiagram";
 import PipelineFlowchart from "../components/PipelineFlowchart";
+import { api } from "../lib/api";
 
 const GithubIcon = ({ className }: { className?: string }) => (
   <svg
@@ -132,6 +133,11 @@ const steps = [
 
 export default function LandingPage() {
   const [copiedStep, setCopiedStep] = useState<number | null>(null);
+
+  useEffect(() => {
+    // Wake up the backend when a user visits the landing page
+    api.wakeup();
+  }, []);
 
   return (
     <main className="min-h-screen bg-black text-white font-sans selection:bg-neutral-800 overflow-x-hidden">
