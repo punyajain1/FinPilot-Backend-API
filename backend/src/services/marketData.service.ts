@@ -1,0 +1,999 @@
+import axios, { AxiosError } from 'axios';
+import * as ccxt from 'ccxt';
+import YahooFinanceClass from 'yahoo-finance2';
+import type { ChartResultArray } from 'yahoo-finance2/esm/src/modules/chart';
+import { config } from '../config/config';
+import { logger } from '../utils/logger';
+import cacheService from './cache.service';
+
+const yahooFinance = new YahooFinanceClass();
+
+
+export interface PriceData {
+  symbol: string;
+  price: number;
+  timestamp: Date;
+}
+
+export interface HistoricalPrice {
+  timestamp: Date;
+  price: number;
+  volume?: number;
+}
+
+export interface TechnicalIndicators {
+  priceChange7d: number; // Percentage change
+  volatility: number;
+  movingAverage7d: number;
+  trend: 'UP' | 'DOWN' | 'SIDEWAYS';
+  rsi?: number;
+  rsiSignal?: 'BUY' | 'SELL' | 'NEUTRAL';
+  macd?: {
+    macdLine: number;
+    signalLine: number;
+    histogram: number;
+    signal: 'BUY' | 'SELL' | 'NEUTRAL';
+  };
+  bollingerBands?: {
+    middle: number;
+    upper: number;
+    lower: number;
+    signal: 'BUY' | 'SELL' | 'NEUTRAL';
+  };
+  obv?: number;
+}
+
+/**
+ * Service for fetching market data for cryptocurrencies and precious metals.
+ *
+ * Crypto data source: Binance Public API (https://api.binance.com)
+ *   - No API key required
+ *   - Rate limit: ~1 200 requests/min (weight-based) — far more generous than CoinGecko free tier
+ *
+ * Crypto fallback (if Binance fails): CCXT exchange pool
+ *   - Tries in order: binance → kraken → coinbase → bybit → okx
+ *   - All use public endpoints — no API key required
+ *
+ * Metal data source: gold-api.com
+ *   - No authentication required
+ *   - Rate limit: 9 requests/hour (enforced by sliding-window limiter below)
+ */
+class MarketDataService {
+  // ---------------------------------------------------------------------------
+  // Gold API rate limiter (9 req / hour)
+  // ---------------------------------------------------------------------------
+  private goldApiCallTimestamps: number[] = [];
+  private readonly GOLD_API_MAX_CALLS = 9;
+  private readonly GOLD_API_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+  private localCoinloreAssets: any[] | null = null;
+
+  /**
+   * Enforces the 9-req/hour cap for the Gold API.
+   * Blocks until a request slot becomes available.
+   */
+  private async waitForGoldApiSlot(): Promise<void> {
+    while (true) {
+      const now = Date.now();
+      this.goldApiCallTimestamps = this.goldApiCallTimestamps.filter(
+        (ts) => now - ts < this.GOLD_API_WINDOW_MS
+      );
+
+      if (this.goldApiCallTimestamps.length < this.GOLD_API_MAX_CALLS) {
+        this.goldApiCallTimestamps.push(now);
+        return;
+      }
+
+      const oldestTs = this.goldApiCallTimestamps[0];
+      const waitMs = this.GOLD_API_WINDOW_MS - (now - oldestTs) + 100;
+      logger.warn(
+        `Gold API rate limit reached (${this.GOLD_API_MAX_CALLS}/hr). Waiting ${Math.ceil(waitMs / 1000)}s for a slot...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Generic exponential-backoff retry helper
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Runs `fn` and retries up to `maxRetries` times on HTTP 429 responses,
+   * honouring the Retry-After header when present.
+   */
+  private async withRetry<T>(
+    fn: () => Promise<T>,
+    label: string,
+    maxRetries: number = 4
+  ): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error;
+        const isRateLimit =
+          axios.isAxiosError(error) && error.response?.status === 429;
+
+        if (!isRateLimit || attempt === maxRetries) {
+          throw error;
+        }
+
+        const retryAfterHeader = axios.isAxiosError(error)
+          ? error.response?.headers?.['retry-after']
+          : undefined;
+
+        const backoffMs = retryAfterHeader
+          ? parseInt(retryAfterHeader, 10) * 1000
+          : Math.min(2000 * Math.pow(2, attempt - 1), 30000); // 2s → 4s → 8s … capped at 30s
+
+        logger.warn(
+          `${label} rate limited (429). Attempt ${attempt}/${maxRetries}. Retrying in ${Math.ceil(backoffMs / 1000)}s...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+    }
+    throw lastError;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Crypto — Binance Public API
+  // ---------------------------------------------------------------------------
+
+  /** USD-pegged stablecoins — always worth exactly $1, no API call needed. */
+  private readonly USD_STABLECOINS = new Set([
+    'USDT', 'BUSD', 'USDC', 'DAI', 'TUSD', 'USDP', 'FDUSD',
+  ]);
+
+  /**
+   * Quote currency priority when auto-detecting a Binance pair.
+   * The service tries each in order and picks the first one that exists.
+   */
+  private readonly QUOTE_PRIORITY = ['USDT', 'BTC', 'ETH', 'BNB'];
+
+  /**
+   * Auto-detects the best Binance trading pair for a given symbol.
+   *
+   * Strategy (in order): XXXUSDT → XXXBTC → XXXETH → XXXBNB
+   * Result is cached for 1 hour so the lookup only happens once per symbol.
+   *
+   * Examples:
+   *   BTC  → { pair: 'BTCUSDT',  quote: 'USDT' }
+   *   ETH  → { pair: 'ETHUSDT',  quote: 'USDT' }
+   *   SOL  → { pair: 'SOLUSDT',  quote: 'USDT' }
+   *   RARE → { pair: 'RAREBTC',  quote: 'BTC'  }  ← auto-fallback
+   */
+  private async resolveBinancePair(
+    symbol: string
+  ): Promise<{ pair: string; quote: string } | null> {
+    const upper = symbol.toUpperCase();
+
+    // Stablecoins never need a pair
+    if (this.USD_STABLECOINS.has(upper)) return null;
+
+    const cacheKey = `binance_pair:${upper}`;
+    const cached = await cacheService.get<{ pair: string; quote: string }>(cacheKey);
+    if (cached) return cached;
+
+    for (const quote of this.QUOTE_PRIORITY) {
+      if (upper === quote) continue; // skip self-referential pairs
+
+      const pair = `${upper}${quote}`;
+      try {
+        await axios.get(`${config.apis.binance}/api/v3/ticker/price`, {
+          params: { symbol: pair },
+        });
+        const result = { pair, quote };
+        await cacheService.set(cacheKey, result, 3600); // cache 1 hour
+        logger.info(`Binance: auto-resolved ${upper} → ${pair}`);
+        return result;
+      } catch (err) {
+        if (axios.isAxiosError(err) && err.response?.status === 400) {
+          continue; // this quote currency doesn't exist, try next
+        }
+        throw err; // network error — propagate
+      }
+    }
+
+    // Nothing worked — cache the miss to avoid spamming
+    await cacheService.set(cacheKey, null as any, 3600);
+    return null;
+  }
+
+  /**
+   * Fetches the current USD price for any symbol via Binance.
+   *
+   * - Stablecoins         → $1.00 (no API call)
+   * - XXXUSDT pair exists → direct price
+   * - Only XXXBTC exists  → price × BTC/USD (recursive, cached)
+   * - Only XXXETH exists  → price × ETH/USD
+   * - Only XXXBNB exists  → price × BNB/USD
+   */
+  private async fetchBinancePriceUSD(symbol: string): Promise<number> {
+    const upper = symbol.toUpperCase();
+    if (this.USD_STABLECOINS.has(upper)) return 1.0;
+
+    const pairInfo = await this.resolveBinancePair(symbol);
+    if (!pairInfo) {
+      throw new Error(
+        `"${symbol}" is not listed on Binance. ` +
+        `Tried: ${this.QUOTE_PRIORITY.map((q) => `${upper}${q}`).join(', ')}.`
+      );
+    }
+
+    const response = await this.withRetry(
+      () =>
+        axios.get(`${config.apis.binance}/api/v3/ticker/price`, {
+          params: { symbol: pairInfo.pair },
+        }),
+      `Binance price (${pairInfo.pair})`
+    );
+
+    const rawPrice = parseFloat(response.data.price);
+    if (pairInfo.quote === 'USDT') return rawPrice;
+
+    // Convert to USD: multiply by quote asset's USD price (also auto-resolved)
+    const quoteUsd = await this.fetchBinancePriceUSD(pairInfo.quote);
+    return rawPrice * quoteUsd;
+  }
+
+  /**
+   * Fetches historical daily close prices in USD for any symbol.
+   *
+   * Uses Binance klines (interval=1d). If the resolved pair is not USDT-quoted,
+   * it also fetches the quote asset's historical USD prices and multiplies them.
+   */
+  private async fetchBinanceHistoricalUSD(
+    symbol: string,
+    days: number
+  ): Promise<HistoricalPrice[]> {
+    const upper = symbol.toUpperCase();
+
+    // Stablecoins — flat $1 history, zero API calls
+    if (this.USD_STABLECOINS.has(upper)) {
+      return Array.from({ length: days }, (_, i) => {
+        const date = new Date();
+        date.setDate(date.getDate() - (days - 1 - i));
+        return { timestamp: date, price: 1.0, volume: 0 };
+      });
+    }
+
+    const pairInfo = await this.resolveBinancePair(symbol);
+    if (!pairInfo) {
+      throw new Error(
+        `"${symbol}" is not listed on Binance. ` +
+        `Tried: ${this.QUOTE_PRIORITY.map((q) => `${upper}${q}`).join(', ')}.`
+      );
+    }
+
+    const response = await this.withRetry(
+      () =>
+        axios.get(`${config.apis.binance}/api/v3/klines`, {
+          params: {
+            symbol: pairInfo.pair,
+            interval: '1d',
+            limit: days + 1, // fetch one extra so we have `days` complete candles
+          },
+        }),
+      `Binance klines (${pairInfo.pair}, ${days}d)`
+    );
+
+    // Kline array: [openTime, open, high, low, close, volume, ...]
+    const candles = (response.data as unknown[][]).slice(0, days);
+
+    if (pairInfo.quote === 'USDT') {
+      return candles.map((c) => ({
+        timestamp: new Date(c[0] as number),
+        price: parseFloat(c[4] as string),   // close price in USD
+        volume: parseFloat(c[5] as string),  // base-asset volume
+      }));
+    }
+
+    // Non-USDT quoted: convert each candle's close to USD
+    const quoteHistory = await this.fetchBinanceHistoricalUSD(pairInfo.quote, days);
+    return candles.map((c, i) => ({
+      timestamp: new Date(c[0] as number),
+      price: parseFloat(c[4] as string) * (quoteHistory[i]?.price ?? 1),
+      volume: parseFloat(c[5] as string),
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Crypto — CCXT Fallback Pool
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Ranked list of exchanges to try (in order) when Binance is unavailable.
+   * All use public endpoints — no API key required.
+   */
+  private readonly CCXT_EXCHANGE_PRIORITY: string[] = [
+    'binance', 'kraken', 'coinbase', 'bybit', 'okx',
+  ];
+
+  /**
+   * Lazily-initialised CCXT exchange instances.
+   * Reusing instances avoids repeated construction overhead.
+   */
+  private ccxtExchanges: Map<string, ccxt.Exchange> = new Map();
+
+  /**
+   * Per-exchange flag: have we already called loadMarkets()?
+   * Markets are loaded once and cached in the ccxt exchange object itself.
+   */
+  private ccxtMarketsLoaded: Set<string> = new Set();
+
+  /** Return (or create) a CCXT exchange instance by id. */
+  private getCcxtExchange(id: string): ccxt.Exchange {
+    if (!this.ccxtExchanges.has(id)) {
+      // Instantiate with timeout settings; no credentials needed
+      const ExchangeClass = (ccxt as any)[id] as new (config?: object) => ccxt.Exchange;
+      const exchange = new ExchangeClass({
+        timeout: 10000,
+        enableRateLimit: true,
+      });
+      this.ccxtExchanges.set(id, exchange);
+    }
+    return this.ccxtExchanges.get(id)!;
+  }
+
+  /**
+   * Ensure markets are loaded for the exchange (once per process lifetime).
+   * loadMarkets() is an expensive network call — we guard it with a Set flag.
+   */
+  private async ensureMarketsLoaded(exchange: ccxt.Exchange): Promise<void> {
+    if (this.ccxtMarketsLoaded.has(exchange.id)) return;
+    await exchange.loadMarkets();
+    this.ccxtMarketsLoaded.add(exchange.id);
+  }
+
+  /**
+   * Resolve a USDT/USD market symbol for the given exchange.
+   * Tries `BASE/USDT`, then `BASE/USD`, then `BASE/BUSD`.
+   */
+  private resolveCcxtSymbol(
+    exchange: ccxt.Exchange,
+    base: string
+  ): string | null {
+    const candidates = [`${base}/USDT`, `${base}/USD`, `${base}/BUSD`];
+    for (const sym of candidates) {
+      if (exchange.markets?.[sym]) return sym;
+    }
+    return null;
+  }
+
+  /**
+   * Fetch current USD price via CCXT exchange pool.
+   * Tries each exchange in CCXT_EXCHANGE_PRIORITY order; returns the first success.
+   */
+  private async fetchCcxtPriceUSD(symbol: string): Promise<{ price: number; exchange: string }> {
+    const upper = symbol.toUpperCase();
+
+    if (this.USD_STABLECOINS.has(upper)) return { price: 1.0, exchange: 'internal' };
+
+    const errors: string[] = [];
+
+    for (const exchangeId of this.CCXT_EXCHANGE_PRIORITY) {
+      try {
+        const exchange = this.getCcxtExchange(exchangeId);
+        await this.ensureMarketsLoaded(exchange);
+
+        const ccxtSymbol = this.resolveCcxtSymbol(exchange, upper);
+        if (!ccxtSymbol) {
+          errors.push(`${exchangeId}: no market for ${upper}`);
+          continue;
+        }
+
+        const ticker = await exchange.fetchTicker(ccxtSymbol);
+        const price = ticker.last ?? ticker.close ?? ticker.bid ?? ticker.ask;
+
+        if (price == null || price <= 0) {
+          errors.push(`${exchangeId}: ticker returned null/zero price`);
+          continue;
+        }
+
+        logger.info(`CCXT fallback: ${upper} = $${price.toFixed(4)} via ${exchangeId}`);
+        return { price, exchange: exchangeId };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`${exchangeId}: ${msg}`);
+        logger.warn(`CCXT ${exchangeId} failed for ${upper}: ${msg}`);
+      }
+    }
+
+    throw new Error(
+      `CCXT fallback exhausted all exchanges for "${symbol}". Errors: ${errors.join(' | ')}`
+    );
+  }
+
+  /**
+   * Fetch historical daily OHLCV data via CCXT exchange pool.
+   * Tries each exchange in priority order; returns the first success.
+   */
+  private async fetchCcxtHistoricalUSD(
+    symbol: string,
+    days: number
+  ): Promise<HistoricalPrice[]> {
+    const upper = symbol.toUpperCase();
+
+    if (this.USD_STABLECOINS.has(upper)) {
+      return Array.from({ length: days }, (_, i) => {
+        const date = new Date();
+        date.setDate(date.getDate() - (days - 1 - i));
+        return { timestamp: date, price: 1.0, volume: 0 };
+      });
+    }
+
+    const errors: string[] = [];
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+    for (const exchangeId of this.CCXT_EXCHANGE_PRIORITY) {
+      try {
+        const exchange = this.getCcxtExchange(exchangeId);
+        await this.ensureMarketsLoaded(exchange);
+
+        if (!exchange.has['fetchOHLCV']) {
+          errors.push(`${exchangeId}: fetchOHLCV not supported`);
+          continue;
+        }
+
+        const ccxtSymbol = this.resolveCcxtSymbol(exchange, upper);
+        if (!ccxtSymbol) {
+          errors.push(`${exchangeId}: no market for ${upper}`);
+          continue;
+        }
+
+        // OHLCV: [timestamp, open, high, low, close, volume]
+        const ohlcv = await exchange.fetchOHLCV(ccxtSymbol, '1d', sinceMs, days);
+
+        if (!ohlcv || ohlcv.length === 0) {
+          errors.push(`${exchangeId}: empty OHLCV response`);
+          continue;
+        }
+
+        const prices: HistoricalPrice[] = ohlcv.map((candle: ccxt.OHLCV) => ({
+          timestamp: new Date((candle[0] as number)),
+          price: (candle[4] as number),   // close
+          volume: (candle[5] as number),  // volume
+        }));
+
+        logger.info(
+          `CCXT fallback: ${prices.length} candles for ${upper} via ${exchangeId}`
+        );
+        return prices;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`${exchangeId}: ${msg}`);
+        logger.warn(`CCXT ${exchangeId} OHLCV failed for ${upper}: ${msg}`);
+      }
+    }
+
+    throw new Error(
+      `CCXT fallback exhausted all exchanges for "${symbol}" history. Errors: ${errors.join(' | ')}`
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Crypto — DexScreener Fallback (for memecoins/DEX tokens)
+  // ---------------------------------------------------------------------------
+
+  private async fetchDexScreenerPriceUSD(symbol: string): Promise<number> {
+    const upper = symbol.toUpperCase();
+    if (this.USD_STABLECOINS.has(upper)) return 1.0;
+
+    const response = await this.withRetry(
+      () => axios.get(`https://api.dexscreener.com/latest/dex/search`, { params: { q: symbol } }),
+      `DexScreener price (${symbol})`
+    );
+
+    const pairs = response.data.pairs;
+    if (!pairs || pairs.length === 0) {
+      throw new Error(`DexScreener found no pairs for "${symbol}"`);
+    }
+
+    // Find the first pair where baseToken.symbol matches (case-insensitive)
+    const pair = pairs.find((p: any) => p.baseToken?.symbol?.toUpperCase() === upper);
+    if (!pair || !pair.priceUsd) {
+      throw new Error(`DexScreener found pairs for "${symbol}", but no exact symbol match with priceUsd`);
+    }
+
+    return parseFloat(pair.priceUsd);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public methods — just pass "BTC", "ETH", "SOL", etc.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Get the current USD price for a cryptocurrency.
+   * Primary source: Binance public API.
+   * Fallback: CCXT exchange pool (binance → kraken → coinbase → bybit → okx).
+   */
+  async getCryptoPrice(symbol: string): Promise<PriceData> {
+    const cacheKey = `crypto_price:${symbol}`;
+    const cached = await cacheService.get<PriceData>(cacheKey);
+    if (cached) return cached;
+
+    // --- Primary: Binance ---
+    try {
+      const price = await this.fetchBinancePriceUSD(symbol);
+      const priceData: PriceData = { symbol, price, timestamp: new Date() };
+      await cacheService.set(cacheKey, priceData, 60); // 1 minute cache
+      logger.info(`Binance: ${symbol} = $${price.toFixed(4)}`);
+      return priceData;
+    } catch (binanceError) {
+      const msg = binanceError instanceof Error ? binanceError.message : String(binanceError);
+      logger.warn(`Binance price fetch failed for ${symbol} — engaging CCXT fallback. Reason: ${msg}`);
+    }
+
+    // --- Fallback: CCXT pool ---
+    try {
+      const { price, exchange } = await this.fetchCcxtPriceUSD(symbol);
+      const priceData: PriceData = { symbol, price, timestamp: new Date() };
+      await cacheService.set(cacheKey, priceData, 60);
+      logger.info(`CCXT (${exchange}): ${symbol} = $${price.toFixed(4)}`);
+      return priceData;
+    } catch (ccxtError) {
+      logger.warn(`CCXT fallback exhausted for ${symbol}. Trying DexScreener fallback...`);
+      try {
+        const price = await this.fetchDexScreenerPriceUSD(symbol);
+        const priceData: PriceData = { symbol, price, timestamp: new Date() };
+        await cacheService.set(cacheKey, priceData, 60);
+        logger.info(`DexScreener: ${symbol} = $${price.toFixed(6)}`);
+        return priceData;
+      } catch (dexError) {
+        logger.warn(`DexScreener fallback exhausted for ${symbol}. Caching price as 0 for 1 hour to prevent timeout spam.`);
+        const priceData: PriceData = { symbol, price: 0, timestamp: new Date() };
+        await cacheService.set(cacheKey, priceData, 3600);
+        return priceData;
+      }
+    }
+  }
+
+  /**
+   * Get historical daily USD prices for a cryptocurrency.
+   * Primary source: Binance klines.
+   * Fallback: CCXT OHLCV via exchange pool.
+   */
+  async getCryptoHistoricalPrices(
+    symbol: string,
+    days: number = 7
+  ): Promise<HistoricalPrice[]> {
+    const cacheKey = `crypto_history:${symbol}:${days}`;
+    const cached = await cacheService.get<HistoricalPrice[]>(cacheKey);
+    if (cached) return cached;
+
+    // --- Primary: Binance ---
+    try {
+      const prices = await this.fetchBinanceHistoricalUSD(symbol, days);
+      await cacheService.set(cacheKey, prices, 21600); // 6 hour cache
+      logger.info(`Binance: ${prices.length} candles fetched for ${symbol}`);
+      return prices;
+    } catch (binanceError) {
+      const msg = binanceError instanceof Error ? binanceError.message : String(binanceError);
+      logger.warn(`Binance historical fetch failed for ${symbol} — engaging CCXT fallback. Reason: ${msg}`);
+    }
+
+    // --- Fallback: CCXT pool ---
+    try {
+      const prices = await this.fetchCcxtHistoricalUSD(symbol, days);
+      await cacheService.set(cacheKey, prices, 21600);
+      return prices;
+    } catch (ccxtError) {
+      logger.warn(`CCXT Historical fallback exhausted for ${symbol}. Returning flat current price history.`);
+      try {
+        const currentPrice = await this.getCryptoPrice(symbol);
+        const fallbackPrices = Array.from({ length: days }, (_, i) => {
+          const date = new Date();
+          date.setDate(date.getDate() - (days - 1 - i));
+          return { timestamp: date, price: currentPrice.price, volume: 0 };
+        });
+        return fallbackPrices;
+      } catch (e) {
+        this.handleApiError(ccxtError, 'CCXT Historical Fallback');
+        throw ccxtError;
+      }
+    }
+  }
+
+
+
+  // ---------------------------------------------------------------------------
+  // Metals — gold-api.com
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Get current price for precious metals (Gold/Silver/Platinum/Palladium).
+   */
+  async getMetalPrice(symbol: string): Promise<PriceData> {
+    const cacheKey = `metal_price:${symbol}`;
+    const cached = await cacheService.get<PriceData>(cacheKey);
+    if (cached) return cached;
+
+    try {
+      return await this.getMetalPriceFromGoldApi(symbol);
+    } catch (error) {
+      this.handleApiError(error, 'Gold API');
+      throw error;
+    }
+  }
+
+  /**
+   * Get metal price from gold-api.com
+   * Endpoint: GET https://api.gold-api.com/price/{symbol}
+   * No authentication required. Rate limited to 9 requests/hour.
+   */
+  private async getMetalPriceFromGoldApi(symbol: string): Promise<PriceData> {
+    await this.waitForGoldApiSlot();
+
+    const apiSymbol = this.getMetalSymbol(symbol);
+    const response = await axios.get(`${config.apis.goldApi}/price/${apiSymbol}`);
+    const price = response.data.price || 0;
+
+    logger.info(
+      `Gold API: fetched ${apiSymbol} (${symbol}) = $${price} (${this.goldApiCallTimestamps.length}/${this.GOLD_API_MAX_CALLS} calls this hour)`
+    );
+
+    const priceData: PriceData = { symbol, price, timestamp: new Date() };
+
+    await cacheService.set(`metal_price:${symbol}`, priceData, 400); // ~6.6 min
+    return priceData;
+  }
+
+  /**
+   * Map standard metal names to Yahoo Finance Global USD Futures tickers.
+   */
+  private getYahooFinanceTicker(symbol: string): string {
+    const upper = symbol.toUpperCase();
+    if (upper.includes('GOLD') || upper === 'XAU') return 'GC=F';
+    if (upper.includes('SILVER') || upper === 'XAG') return 'SI=F';
+    if (upper.includes('PLATINUM') || upper === 'XPT') return 'PL=F';
+    if (upper.includes('PALLADIUM') || upper === 'XPD') return 'PA=F';
+    if (upper.includes('COPPER') || upper === 'XCU') return 'HG=F';
+    // Fallback if not recognized (might fail in Yahoo Finance, but we try)
+    return upper;
+  }
+
+  /**
+   * Get historical price data for metals using Yahoo Finance.
+   */
+  async getMetalHistoricalPrices(
+    symbol: string,
+    days: number = 7
+  ): Promise<HistoricalPrice[]> {
+    const cacheKey = `metal_history_yf:${symbol}:${days}`;
+    const cached = await cacheService.get<HistoricalPrice[]>(cacheKey);
+    if (cached) return cached;
+
+    const ticker = this.getYahooFinanceTicker(symbol);
+    const period1 = new Date();
+    period1.setDate(period1.getDate() - days);
+
+    try {
+      const result = (await yahooFinance.chart(ticker, {
+        period1,
+        interval: '1d',
+      })) as unknown as ChartResultArray;
+
+      // Yahoo Finance futures are per troy ounce. Convert to per kg.
+      const prices: HistoricalPrice[] = result.quotes.map(quote => ({
+        timestamp: new Date(quote.date),
+        price: (quote.close || quote.open || 0) * 32.1507466,
+        volume: quote.volume || 0,
+      }));
+
+      await cacheService.set(cacheKey, prices, 1800); // Cache for 30 minutes
+      logger.info(`Fetched real historical data for ${symbol} (${ticker}) from Yahoo Finance`);
+      return prices;
+    } catch (error) {
+      logger.error(`Error fetching historical data from Yahoo Finance for ${symbol}:`, error);
+      
+      // Fallback: If it fails, just return current price as a single data point
+      const currentPrice = await this.getMetalPrice(symbol);
+      return [{
+        timestamp: new Date(),
+        price: currentPrice.price,
+        volume: 0
+      }];
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Technical-indicator calculations (unchanged)
+  // ---------------------------------------------------------------------------
+
+  private calculateRSI(
+    prices: number[],
+    period: number = 14
+  ): { rsi: number; signal: 'BUY' | 'SELL' | 'NEUTRAL' } {
+    if (prices.length <= period) return { rsi: 50, signal: 'NEUTRAL' };
+
+    let gainsSum = 0;
+    let lossesSum = 0;
+    for (let i = 1; i <= period; i++) {
+      const change = prices[i] - prices[i - 1];
+      if (change > 0) gainsSum += change;
+      else lossesSum -= change;
+    }
+
+    let avgGain = gainsSum / period;
+    let avgLoss = lossesSum / period;
+
+    for (let i = period + 1; i < prices.length; i++) {
+      const change = prices[i] - prices[i - 1];
+      avgGain = (avgGain * (period - 1) + Math.max(change, 0)) / period;
+      avgLoss = (avgLoss * (period - 1) + Math.max(-change, 0)) / period;
+    }
+
+    let rsi = 50;
+    if (avgLoss === 0) rsi = 100;
+    else rsi = 100 - 100 / (1 + avgGain / avgLoss);
+
+    let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
+    if (rsi < 30) signal = 'BUY';
+    else if (rsi > 70) signal = 'SELL';
+
+    return { rsi, signal };
+  }
+
+  private calculateEMA(prices: number[], period: number): number[] {
+    if (prices.length === 0) return [];
+    const ema: number[] = new Array(prices.length).fill(0);
+    const k = 2 / (period + 1);
+    const initialPeriod = Math.min(period, prices.length);
+
+    let sum = 0;
+    for (let i = 0; i < initialPeriod; i++) sum += prices[i];
+    ema[initialPeriod - 1] = sum / initialPeriod;
+
+    for (let i = 0; i < initialPeriod - 1; i++) ema[i] = prices[i];
+    for (let i = initialPeriod; i < prices.length; i++) {
+      ema[i] = (prices[i] - ema[i - 1]) * k + ema[i - 1];
+    }
+    return ema;
+  }
+
+  private calculateMACD(prices: number[]): {
+    macdLine: number;
+    signalLine: number;
+    histogram: number;
+    signal: 'BUY' | 'SELL' | 'NEUTRAL';
+  } {
+    if (prices.length < 26)
+      return { macdLine: 0, signalLine: 0, histogram: 0, signal: 'NEUTRAL' };
+
+    const ema12 = this.calculateEMA(prices, 12);
+    const ema26 = this.calculateEMA(prices, 26);
+    const macdLine = ema12.map((v, i) => v - ema26[i]);
+    const signalLine = this.calculateEMA(macdLine, 9);
+    const histogram = macdLine.map((v, i) => v - signalLine[i]);
+
+    const last = macdLine.length - 1;
+    const prev = last - 1;
+    let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
+    if (last >= 1) {
+      if (macdLine[last] > signalLine[last] && macdLine[prev] <= signalLine[prev])
+        signal = 'BUY';
+      else if (macdLine[last] < signalLine[last] && macdLine[prev] >= signalLine[prev])
+        signal = 'SELL';
+    }
+
+    return {
+      macdLine: macdLine[last] || 0,
+      signalLine: signalLine[last] || 0,
+      histogram: histogram[last] || 0,
+      signal,
+    };
+  }
+
+  private calculateBollingerBands(
+    prices: number[],
+    currentPrice: number,
+    period: number = 20
+  ): { middle: number; upper: number; lower: number; signal: 'BUY' | 'SELL' | 'NEUTRAL' } {
+    if (prices.length < period) {
+      const middle = prices.reduce((a, v) => a + v, 0) / (prices.length || 1);
+      return { middle, upper: middle, lower: middle, signal: 'NEUTRAL' };
+    }
+
+    const slice = prices.slice(prices.length - period);
+    const middle = slice.reduce((a, v) => a + v, 0) / period;
+    const stdDev = Math.sqrt(
+      slice.map((v) => Math.pow(v - middle, 2)).reduce((a, v) => a + v, 0) / period
+    );
+    const upper = middle + 2 * stdDev;
+    const lower = middle - 2 * stdDev;
+
+    let signal: 'BUY' | 'SELL' | 'NEUTRAL' = 'NEUTRAL';
+    if (currentPrice <= lower) signal = 'BUY';
+    else if (currentPrice >= upper) signal = 'SELL';
+
+    return { middle, upper, lower, signal };
+  }
+
+  private calculateOBV(prices: HistoricalPrice[]): number {
+    if (prices.length === 0) return 0;
+    let obv = prices[0].volume || 0;
+    for (let i = 1; i < prices.length; i++) {
+      const vol = prices[i].volume || 0;
+      if (prices[i].price > prices[i - 1].price) obv += vol;
+      else if (prices[i].price < prices[i - 1].price) obv -= vol;
+    }
+    return obv;
+  }
+
+  /**
+   * Calculate technical indicators from price history.
+   */
+  calculateTechnicalIndicators(prices: HistoricalPrice[]): TechnicalIndicators {
+    if (prices.length < 2) {
+      return {
+        priceChange7d: 0,
+        volatility: 0,
+        movingAverage7d: prices[0]?.price || 0,
+        trend: 'SIDEWAYS',
+      };
+    }
+
+    const last7dPrices = prices.slice(-7);
+    const currentPrice = prices[prices.length - 1].price;
+    const oldPrice7d = last7dPrices[0]?.price || prices[0].price;
+    const priceChange7d = ((currentPrice - oldPrice7d) / oldPrice7d) * 100;
+
+    const movingAverage7d =
+      last7dPrices.reduce((acc, p) => acc + p.price, 0) / last7dPrices.length;
+
+    const mean = prices.reduce((acc, p) => acc + p.price, 0) / prices.length;
+    const volatility = Math.sqrt(
+      prices.map((p) => Math.pow(p.price - mean, 2)).reduce((a, v) => a + v, 0) /
+      prices.length
+    );
+
+    let trend: 'UP' | 'DOWN' | 'SIDEWAYS' = 'SIDEWAYS';
+    if (priceChange7d > 2) trend = 'UP';
+    else if (priceChange7d < -2) trend = 'DOWN';
+
+    const rawCloses = prices.map((p) => p.price);
+    const rsiCalc = this.calculateRSI(rawCloses);
+    const macdCalc = this.calculateMACD(rawCloses);
+    const bbCalc = this.calculateBollingerBands(rawCloses, currentPrice);
+    const obvCalc = this.calculateOBV(prices);
+
+    return {
+      priceChange7d,
+      volatility,
+      movingAverage7d,
+      trend,
+      rsi: Number(rsiCalc.rsi.toFixed(2)),
+      rsiSignal: rsiCalc.signal,
+      macd: {
+        macdLine: Number(macdCalc.macdLine.toFixed(4)),
+        signalLine: Number(macdCalc.signalLine.toFixed(4)),
+        histogram: Number(macdCalc.histogram.toFixed(4)),
+        signal: macdCalc.signal,
+      },
+      bollingerBands: {
+        middle: Number(bbCalc.middle.toFixed(2)),
+        upper: Number(bbCalc.upper.toFixed(2)),
+        lower: Number(bbCalc.lower.toFixed(2)),
+        signal: bbCalc.signal,
+      },
+      obv: obvCalc,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Symbol helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Map common precious-metal names/symbols to Gold API symbols.
+   */
+  private getMetalSymbol(symbol: string): string {
+    const mapping: Record<string, string> = {
+      GOLD: 'XAU',
+      SILVER: 'XAG',
+      PLATINUM: 'XPT',
+      PALLADIUM: 'XPD',
+    };
+    return mapping[symbol.toUpperCase()] || symbol.toUpperCase();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Error handling
+  // ---------------------------------------------------------------------------
+
+  private handleApiError(error: unknown, apiName: string): void {
+    if (axios.isAxiosError(error)) {
+      const axiosError = error as AxiosError;
+      if (axiosError.response?.status === 429) {
+        logger.error(`${apiName} rate limit exceeded.`);
+      } else if (axiosError.response?.status === 401) {
+        logger.error(`${apiName} authentication failed. Check API key.`);
+      } else {
+        logger.error(`${apiName} API error:`, {
+          status: axiosError.response?.status,
+          message: axiosError.message,
+        });
+      }
+    } else {
+      logger.error(`${apiName} unknown error:`, error);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Coinlore Market Data (Global & Assets)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fetch global market data from Coinlore (cached for 2 mins)
+   */
+  async getGlobalMarketData(): Promise<any> {
+    const cacheKey = 'coinlore:global';
+    const cached = await cacheService.get<any>(cacheKey);
+    if (cached) return cached;
+    
+    try {
+      const response = await this.withRetry(
+        () => axios.get('https://api.coinlore.net/api/global/'),
+        'Coinlore Global Data'
+      );
+      const data = response.data[0];
+      await cacheService.set(cacheKey, data, 120);
+      return data;
+    } catch (error) {
+      logger.error('Failed to fetch Coinlore Global Data', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Fetch asset info (market cap, rank, etc) from Coinlore
+   * Since we have all assets locally in coinlore_asset.json, we use that instead of fetching.
+   */
+  async getCoinloreAssetInfo(symbol: string): Promise<any | null> {
+    const upper = symbol.toUpperCase();
+    if (this.USD_STABLECOINS.has(upper)) return null;
+
+    if (!this.localCoinloreAssets) {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const localPath = path.join(__dirname, '../coinlore_asset.json');
+        const fileContent = fs.readFileSync(localPath, 'utf8');
+        this.localCoinloreAssets = JSON.parse(fileContent).data;
+      } catch (error) {
+        logger.error('Failed to load local Coinlore Assets', error);
+        return null;
+      }
+    }
+    
+    if (!this.localCoinloreAssets) return null;
+    
+    // Find the basic info from the local list (includes rank and id)
+    const assetBasics = this.localCoinloreAssets.find((a: any) => a.symbol.toUpperCase() === upper);
+    if (!assetBasics) return null;
+    
+    // For market cap and volume, we need to call /api/ticker/?id=
+    try {
+      const tickerCacheKey = `coinlore:ticker:${assetBasics.id}`;
+      let tickerInfo = await cacheService.get<any>(tickerCacheKey);
+      if (!tickerInfo) {
+        const response = await this.withRetry(
+          () => axios.get(`https://api.coinlore.net/api/ticker/?id=${assetBasics.id}`),
+          `Coinlore Ticker (${assetBasics.symbol})`
+        );
+        tickerInfo = response.data[0];
+        await cacheService.set(tickerCacheKey, tickerInfo, 600); // 10 minutes
+      }
+      return {
+        ...assetBasics,
+        ...tickerInfo
+      };
+    } catch (error) {
+      logger.error(`Failed to fetch Coinlore Ticker for ${assetBasics.symbol}`, error);
+      return assetBasics;
+    }
+  }
+}
+
+export default new MarketDataService();
+
