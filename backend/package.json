@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "nodemon src/server.ts",
-    "build": "npm install && npx prisma generate && npx tsc",
+    "build": "npm install && npx prisma generate && npx tsc && cp src/coinlore_asset.json dist/coinlore_asset.json",
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
